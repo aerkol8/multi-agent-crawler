@@ -77,14 +77,14 @@ def cmd_search(args: argparse.Namespace) -> int:
     storage = Storage(args.db)
     try:
         service = SearchService(storage)
-        results = service.search(args.query, limit=args.limit)
+        results = service.search(args.query, limit=args.limit, sort_by=args.sort_by)
         if args.json:
             payload = [asdict(item) for item in results]
             print(json.dumps(payload, indent=2))
             return 0
 
         for item in results:
-            print(f"{item.relevant_url}\t{item.origin_url}\t{item.depth}")
+            print(f"{item.word}\t{item.url}\t{item.origin}\t{item.depth}\t{item.freq:.6f}\t{item.score:.6f}")
         return 0
     finally:
         storage.close_thread_connection()
@@ -128,7 +128,7 @@ def cmd_web(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Single-machine web crawler with live search")
-    parser.add_argument("--db", default="crawler.db", help="SQLite database path")
+    parser.add_argument("--db", default="crawler_data", help="Storage root path")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -147,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser = subparsers.add_parser("search", help="Search indexed pages")
     search_parser.add_argument("query", help="Query string")
     search_parser.add_argument("--limit", type=int, default=20, help="Maximum results")
+    search_parser.add_argument("--sort-by", default="relevance", help="Sort mode (relevance/depth)")
     search_parser.add_argument("--json", action="store_true", help="Emit JSON output")
     search_parser.set_defaults(func=cmd_search)
 
@@ -160,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     web_parser = subparsers.add_parser("web", help="Run localhost web dashboard")
     web_parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
-    web_parser.add_argument("--port", type=int, default=8080, help="Port to bind")
+    web_parser.add_argument("--port", type=int, default=3600, help="Port to bind")
     web_parser.set_defaults(func=cmd_web)
 
     return parser

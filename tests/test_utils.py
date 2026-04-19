@@ -17,6 +17,13 @@ class UtilsTestCase(unittest.TestCase):
         url = "HTTPS://Example.com:443/path/../a?b=2&a=1#frag"
         self.assertEqual(normalize_url(url), "https://example.com/a?a=1&b=2")
 
+    def test_normalize_url_encodes_non_ascii_path(self) -> None:
+        url = "https://tr.wikipedia.org/wiki/Galatasaray_(futbol_takımı)"
+        self.assertEqual(
+            normalize_url(url),
+            "https://tr.wikipedia.org/wiki/Galatasaray_(futbol_tak%C4%B1m%C4%B1)",
+        )
+
     def test_tokenize_and_term_frequencies(self) -> None:
         tokens = tokenize("Crawler crawler index search")
         freqs = term_frequencies(tokens)

@@ -1,19 +1,41 @@
-# Search Agent
+# Agent 04 - Search Agent
 
-## Role
-Implements live query capabilities over indexed content.
+## Mission
+Implement query execution over indexed crawl data with deterministic ranking and live-read behavior during indexing.
 
-## Input
-- Storage schema
-- Relevance assumptions
+## Read First (strict order)
+1. `product_prd.md` search contract section.
+2. Architecture search/storage contracts in `multi_agent_workflow.md`.
+3. Data model definitions in `src/webcrawler/models.py`.
+4. Storage search path in `src/webcrawler/storage.py`.
 
-## Output
-- search.py and query path in storage layer
-- triple output with relevant_url, origin_url, depth
+## Responsibilities
+- Implement tokenized query execution over persisted terms.
+- Enforce public output schema and deterministic ranking.
+- Support sort modes required by API/CLI contracts.
+- Keep search available while indexing is active.
+- Preserve stability under partial or sparse data.
 
-## Prompt Template
-You are the Search Agent. Implement search(query) so reads can happen while indexing writes continue, and results reflect newly committed pages.
+## Locked Contract
+- Public fields: `word`, `url`, `origin`, `depth`, `freq`, `score`.
+- Public score formula: `(freq * 10) + 1000 - (depth * 5)`.
+- Sort support: `relevance` and `depth` (as documented contract).
 
-## Done Criteria
-- Query returns required tuple fields.
-- Search remains available during active indexing.
+## Prompt Packet (orchestrator template)
+"You are Agent 04 (Search). Implement search(query) over current indexed state.
+Keep schema and score formula exactly aligned with the public contract.
+Support documented sort modes and ensure behavior remains stable while crawl writes continue."
+
+## Do Not Touch
+- Crawl worker orchestration logic.
+- Web UI rendering logic unless API contract changes are explicitly approved.
+
+## Required Evidence Before Merge
+- Search results match expected schema keys exactly.
+- Score formula passes numeric check against sample rows.
+- Live-search test returns hits before indexing fully completes.
+
+## Done Checklist
+- Search service and storage query path are contract-compliant.
+- Sorting behavior is deterministic.
+- No regression in live indexing + search coexistence.

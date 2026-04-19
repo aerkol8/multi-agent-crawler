@@ -6,6 +6,7 @@ A stdlib-first Python crawler and search system that supports:
 - queue-depth and rate-limit backpressure
 - live search while indexing is still active
 - status visibility and resume support
+- append-only filesystem records and inspectable bucketed *.data output
 
 ## Step-by-Step (Homework Execution)
 
@@ -58,14 +59,17 @@ In another terminal:
 ```
 
 Output shape per result:
-- relevant_url
-- origin_url
+- word
+- url
+- origin
 - depth
+- freq
+- score
 
 Search semantics:
 - Query terms are matched with ALL-terms logic (AND behavior).
-- Result ordering uses internal ranking by summed term frequency, then shallower depth, then URL order.
-- Internal ranking score is not returned in the public response contract.
+- Default ordering (`--sort-by relevance` / `sortBy=relevance`) uses score DESC, depth ASC, URL ASC.
+- Public score formula: `score = (freq * 10) + 1000 - (depth * 5)`.
 
 ## 5) Inspect status and backpressure
 
@@ -110,24 +114,25 @@ This prints PASS/FAIL for:
 - CLI availability
 - scalability profile generation
 - live search during active indexing
-- strict triple output contract
+- search output contract + public score formula
+- term data inspectability
 - status telemetry presence
 - resume behavior
 
 ## 9) Run localhost web server
 
 ```bash
-"/Users/aerkol/Desktop/web crawler multiagent/.venv/bin/python" main.py --db crawler.db web --host 127.0.0.1 --port 8080
+"/Users/aerkol/Desktop/web crawler multiagent/.venv/bin/python" main.py --db crawler.db web --host 127.0.0.1 --port 3600
 ```
 
-If port 8080 is already in use, choose another port, for example:
+If port 3600 is already in use, choose another port, for example:
 
 ```bash
 "/Users/aerkol/Desktop/web crawler multiagent/.venv/bin/python" main.py --db crawler.db web --host 127.0.0.1 --port 8090
 ```
 
 Open in browser:
-- http://127.0.0.1:8080/
+- http://127.0.0.1:3600/
 
 Web UI capabilities:
 - start indexing with origin and depth
@@ -135,12 +140,14 @@ Web UI capabilities:
 - view status with queue depth and throttled events
 - list runs and active state
 - stop and resume runs
+- live status stream via SSE (`/api/events`)
 
 API endpoints (same server):
 - GET /api/health
 - GET /api/runs?limit=20
 - GET /api/status?run_id=1
-- GET /api/search?q=crawler&limit=20
+- GET /api/search?q=crawler&limit=20&sortBy=relevance
+- GET /api/events?run_id=1
 - POST /api/index
 - POST /api/resume
 - POST /api/stop
@@ -178,7 +185,7 @@ This command runs a synthetic local crawl and prints JSON metrics including:
 ## CLI Commands
 
 - index: start a new crawl or resume an existing run
-- search: query indexed pages and return (relevant_url, origin_url, depth)
+- search: query indexed pages and return (word, url, origin, depth, freq, score)
 - status: inspect run state, queue counters, and runtime heartbeat
 - runs: list recent crawl runs
 - web: run localhost web dashboard and JSON API
@@ -188,7 +195,8 @@ This command runs a synthetic local crawl and prints JSON metrics including:
 See grading_checklist.md for requirement-by-requirement mapping to implementation and proof commands.
 
 ## Project Layout
-- src/webcrawler/storage.py: SQLite schema and query APIs
+- src/webcrawler/storage.py: append-only filesystem storage and search index replay
+- storage root output: bucketed `.data` files (for example `a.data`, `p.data`, `_.data`) plus `all.data`; mirrored under `data/storage/`
 - src/webcrawler/crawler.py: crawl engine, workers, limiter, backpressure
 - src/webcrawler/search.py: query service
 - src/webcrawler/cli.py: commands index/search/status/runs
@@ -199,5 +207,5 @@ See grading_checklist.md for requirement-by-requirement mapping to implementatio
 
 ## Notes
 - No external runtime dependency is required.
-- SQLite WAL mode allows concurrent search reads while indexing writes are active.
-- Search ranking is internal; exposed output remains strict triples.
+- Filesystem append-only logs keep crawl/search records transparent for manual inspection.
+- Search ranking is public and reproducible using the documented score formula.

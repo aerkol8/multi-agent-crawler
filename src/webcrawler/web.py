@@ -207,14 +207,13 @@ class WebAppState:
         payload["active"] = self.is_active(target)
         return payload
 
-    def search(self, query: str, limit: int) -> list[dict[str, Any]]:
-        storage = self._with_storage()
-        try:
-            rows = SearchService(storage).search(query=query, limit=limit)
-            return [asdict(row) for row in rows]
-        finally:
-            storage.close_thread_connection()
-
+    def search(self, query: str, limit: int, sort_by: str) -> list[dict[str, Any]]:
+      storage = self._with_storage()
+      try:
+        rows = SearchService(storage).search(query=query, limit=limit, sort_by=sort_by)
+        return [asdict(row) for row in rows]
+      finally:
+        storage.close_thread_connection()
 
 DASHBOARD_HTML = """<!doctype html>
 <html>
@@ -259,7 +258,7 @@ DASHBOARD_HTML = """<!doctype html>
         display: grid;
         gap: 8px;
       }
-      input, button {
+      input, button, select {
         font-size: 0.95rem;
         padding: 8px 10px;
         border-radius: 8px;
@@ -341,6 +340,7 @@ DASHBOARD_HTML = """<!doctype html>
           <input id=\"stop-run-id\" type=\"number\" min=\"1\" required placeholder=\"Run ID to stop\" />
           <button type=\"submit\" class=\"secondary\">Stop</button>
         </form>
+        <p id=\"stop-feedback\" class=\"muted\" style=\"margin-top:8px; min-height:1.2em;\"></p>
       </section>
 
       <section class=\"panel\">
@@ -351,13 +351,18 @@ DASHBOARD_HTML = """<!doctype html>
             <input id=\"limit\" type=\"number\" min=\"1\" value=\"20\" placeholder=\"Limit\" />
             <button type=\"submit\">Search</button>
           </div>
+          <select id=\"sort-by\">
+            <option value=\"relevance\" selected>Sort: relevance</option>
+            <option value=\"depth\">Sort: depth</option>
+          </select>
         </form>
         <pre id=\"search-results\">[]</pre>
+        <p id=\"delete-feedback\" class=\"muted\" style=\"margin-top:8px; min-height:1.2em;\"></p>
       </section>
 
       <section class=\"panel\">
         <h2 class=\"title\">Run Status</h2>
-        <p class=\"muted\">Latest run status auto-refreshes every 2 seconds.</p>
+        <p class=\"muted\">Live status stream uses SSE; polling fallback is automatic if needed.</p>
         <pre id=\"status-results\">{}</pre>
       </section>
 
@@ -373,6 +378,9 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
 
     <script>
+      let statusStream = null;
+      let streamedRunId = null;
+
       async function api(method, path, payload) {
         const options = { method, headers: { 'Content-Type': 'application/json' } };
         if (payload) { options.body = JSON.stringify(payload); }
@@ -406,6 +414,54 @@ DASHBOARD_HTML = """<!doctype html>
       async function refreshStatus() {
         const status = await api('GET', '/api/status');
         setPre('status-results', status || {});
+        const run = status && status.run ? status.run : null;
+        const isActive = Boolean(status && status.active);
+        if (run && isActive) {
+          openStatusStream(Number(run.id));
+        }
+      }
+
+      function closeStatusStream() {
+        if (statusStream) {
+          statusStream.close();
+          statusStream = null;
+          streamedRunId = null;
+        }
+      }
+
+      function openStatusStream(runId) {
+        if (!window.EventSource) {
+          return;
+        }
+        if (statusStream && streamedRunId === runId) {
+          return;
+        }
+
+        closeStatusStream();
+        streamedRunId = runId;
+        statusStream = new EventSource('/api/events?run_id=' + runId);
+
+        const handlePayload = (payload) => {
+          setPre('status-results', payload || {});
+          refreshRuns().catch(() => {});
+        };
+
+        statusStream.addEventListener('status', (event) => {
+          try {
+            handlePayload(JSON.parse(event.data));
+          } catch (_err) {
+            // ignore malformed chunks
+          }
+        });
+
+        statusStream.addEventListener('done', (_event) => {
+          closeStatusStream();
+          refreshAll().catch(() => {});
+        });
+
+        statusStream.onerror = () => {
+          closeStatusStream();
+        };
       }
 
       document.getElementById('start-form').addEventListener('submit', async (event) => {
@@ -421,6 +477,7 @@ DASHBOARD_HTML = """<!doctype html>
           const out = await api('POST', '/api/index', payload);
           document.getElementById('resume-run-id').value = out.run_id;
           document.getElementById('stop-run-id').value = out.run_id;
+          openStatusStream(Number(out.run_id));
           await refreshRuns();
           await refreshStatus();
         } catch (err) {
@@ -436,6 +493,7 @@ DASHBOARD_HTML = """<!doctype html>
           if (val) { payload.run_id = Number(val); }
           const out = await api('POST', '/api/resume', payload);
           document.getElementById('stop-run-id').value = out.run_id;
+          openStatusStream(Number(out.run_id));
           await refreshRuns();
           await refreshStatus();
         } catch (err) {
@@ -447,10 +505,21 @@ DASHBOARD_HTML = """<!doctype html>
         event.preventDefault();
         try {
           const runId = Number(document.getElementById('stop-run-id').value);
-          await api('POST', '/api/stop', { run_id: runId });
+          const out = await api('POST', '/api/stop', { run_id: runId });
+          const feedback = document.getElementById('stop-feedback');
+          if (out.stop_requested) {
+            feedback.style.color = '#0a6f3c';
+            feedback.textContent = 'Stop requested for run ' + runId + '.';
+          } else {
+            feedback.style.color = '#9a5d00';
+            feedback.textContent = 'Run ' + runId + ' is not active; nothing to stop.';
+          }
           await refreshRuns();
           await refreshStatus();
         } catch (err) {
+          const feedback = document.getElementById('stop-feedback');
+          feedback.style.color = '#9d1c1c';
+          feedback.textContent = 'Stop request failed: ' + err.message;
           alert(err.message);
         }
       });
@@ -460,7 +529,8 @@ DASHBOARD_HTML = """<!doctype html>
         try {
           const query = encodeURIComponent(document.getElementById('query').value);
           const limit = Number(document.getElementById('limit').value);
-          const rows = await api('GET', '/api/search?q=' + query + '&limit=' + limit);
+          const sortBy = encodeURIComponent(document.getElementById('sort-by').value || 'relevance');
+          const rows = await api('GET', '/api/search?q=' + query + '&limit=' + limit + '&sortBy=' + sortBy);
           setPre('search-results', rows);
         } catch (err) {
           alert(err.message);
@@ -476,7 +546,11 @@ DASHBOARD_HTML = """<!doctype html>
       }
 
       refreshAll();
-      setInterval(refreshAll, 2000);
+      if (!window.EventSource) {
+        setInterval(refreshAll, 2000);
+      } else {
+        setInterval(refreshRuns, 5000);
+      }
     </script>
   </body>
 </html>
@@ -501,6 +575,22 @@ class WebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_sse_headers(self) -> None:
+      self.send_response(HTTPStatus.OK)
+      self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+      self.send_header("Cache-Control", "no-cache")
+      self.send_header("Connection", "keep-alive")
+      self.end_headers()
+
+    def _write_sse_event(self, event_name: str, payload: Any) -> None:
+      chunk = f"event: {event_name}\n".encode("utf-8")
+      self.wfile.write(chunk)
+      data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+      self.wfile.write(b"data: ")
+      self.wfile.write(data)
+      self.wfile.write(b"\n\n")
+      self.wfile.flush()
 
     def _read_json(self) -> dict[str, Any]:
         raw_len = self.headers.get("Content-Length", "0")
@@ -563,6 +653,35 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(payload or {})
             return
 
+        if parsed.path == "/api/events":
+            params = parse_qs(parsed.query)
+            requested_run_id: int | None = None
+            raw_run = params.get("run_id", [""])[0].strip()
+            if raw_run:
+                try:
+                    requested_run_id = int(raw_run)
+                except ValueError:
+                    self._bad_request("run_id must be an integer")
+                    return
+
+            self._send_sse_headers()
+            self.close_connection = True
+            try:
+                for _ in range(300):
+                    payload = self.app_state.run_status(requested_run_id) or {}
+                    self._write_sse_event("status", payload)
+
+                    run = payload.get("run") if isinstance(payload, dict) else None
+                    active = bool(payload.get("active")) if isinstance(payload, dict) else False
+                    run_status = str(run.get("status", "")) if isinstance(run, dict) else ""
+                    if run_status in {"completed", "stopped", "failed"} and not active:
+                        self._write_sse_event("done", payload)
+                        return
+                    time.sleep(1.0)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            return
+
         if parsed.path == "/api/search":
             params = parse_qs(parsed.query)
             query = params.get("q", [""])[0]
@@ -572,11 +691,16 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._bad_request("limit must be an integer")
                 return
 
+            sort_by = params.get("sortBy", ["relevance"])[0].strip().lower() or "relevance"
+            if sort_by not in {"relevance", "depth"}:
+                self._bad_request("sortBy must be relevance or depth")
+                return
+
             if not query.strip():
                 self._bad_request("q parameter is required")
                 return
 
-            rows = self.app_state.search(query=query, limit=max(1, limit))
+            rows = self.app_state.search(query=query, limit=max(1, limit), sort_by=sort_by)
             self._send_json(rows)
             return
 

@@ -44,7 +44,7 @@ def print_result(result: CheckResult) -> None:
 class EvalHandler(BaseHTTPRequestHandler):
     routes = {
         "/": "<html><body><a href='/a'>A</a><a href='/b'>B</a>seed page</body></html>",
-        "/a": "<html><body>crawler python requirement triple output</body></html>",
+        "/a": "<html><body>crawler python requirement public score output</body></html>",
         "/b": "<html><body><a href='/c'>C</a>index in progress</body></html>",
         "/c": "<html><body>running while indexing</body></html>",
     }
@@ -244,22 +244,67 @@ def _parse_latest_run_id(root: Path, python_bin: str, db_path: str) -> int | Non
         return None
 
 
-def _validate_triple_payload(payload: str) -> tuple[bool, str]:
+def _validate_search_payload(payload: str) -> tuple[bool, str, list[dict[str, Any]]]:
     try:
         rows = json.loads(payload or "[]")
     except json.JSONDecodeError as exc:
-        return False, f"invalid JSON: {exc}"
+        return False, f"invalid JSON: {exc}", []
 
     if not isinstance(rows, list):
-        return False, "search output is not a list"
+        return False, "search output is not a list", []
 
     for row in rows:
         if not isinstance(row, dict):
-            return False, "search row is not an object"
+            return False, "search row is not an object", []
         keys = set(row.keys())
-        if keys != {"relevant_url", "origin_url", "depth"}:
-            return False, f"unexpected keys: {sorted(keys)}"
-    return True, "search rows use strict triple fields"
+        if keys != {"word", "url", "origin", "depth", "freq", "score"}:
+            return False, f"unexpected keys: {sorted(keys)}", []
+    return True, "search rows use public scoring fields", rows
+
+
+def _term_data_bucket(term: str) -> str:
+    if not term:
+        return "_"
+    leading = term[0].lower()
+    if leading.isdigit() or ("a" <= leading <= "z"):
+        return leading
+    return "_"
+
+
+def _validate_term_data(path: Path) -> tuple[bool, str]:
+    if not path.exists():
+        return False, f"missing storage directory at {path}"
+
+    data_files = sorted(path.glob("*.data"))
+    if not data_files:
+        return False, "no *.data files found"
+
+    total_lines = 0
+    for data_file in data_files:
+        bucket = data_file.stem
+        lines = [line.strip() for line in data_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        total_lines += len(lines)
+
+        for line in lines:
+            parts = line.split(" ")
+            if len(parts) < 5:
+                return False, f"{data_file.name} line has fewer than 5 columns"
+
+            try:
+                float(parts[-1])
+                int(parts[-2])
+            except ValueError:
+                return False, f"{data_file.name} trailing depth/freq columns are not numeric"
+
+            if bucket != "all":
+                expected_bucket = _term_data_bucket(parts[0])
+                if bucket != expected_bucket:
+                    return False, f"{data_file.name} contains term assigned to bucket {expected_bucket}"
+
+    if total_lines <= 0:
+        return False, "all *.data files are empty"
+
+    return True, f"{len(data_files)} data files present with {total_lines} total lines"
 
 
 def live_index_search_and_resume_check(root: Path, python_bin: str) -> list[CheckResult]:
@@ -300,8 +345,10 @@ def live_index_search_and_resume_check(root: Path, python_bin: str) -> list[Chec
             stderr=subprocess.DEVNULL,
         )
         saw_live_result = False
-        triple_shape_ok = True
-        triple_shape_detail = ""
+        shape_ok = True
+        shape_detail = ""
+        score_ok = True
+        score_detail = ""
 
         try:
             deadline = time.time() + 20
@@ -310,23 +357,34 @@ def live_index_search_and_resume_check(root: Path, python_bin: str) -> list[Chec
                     break
 
                 search_proc = run_cmd(
-                    [python_bin, "main.py", "--db", db_path, "search", "crawler", "--json"],
+                    [python_bin, "main.py", "--db", db_path, "search", "crawler", "--sort-by", "relevance", "--json"],
                     cwd=root,
                     timeout=30,
                 )
                 if search_proc.returncode == 0:
-                    valid, detail = _validate_triple_payload(search_proc.stdout)
+                    valid, detail, rows = _validate_search_payload(search_proc.stdout)
                     if not valid:
-                        triple_shape_ok = False
-                        triple_shape_detail = detail
+                        shape_ok = False
+                        shape_detail = detail
                         break
 
-                    try:
-                        rows = json.loads(search_proc.stdout or "[]")
-                    except json.JSONDecodeError:
-                        rows = []
                     if rows and proc.poll() is None:
                         saw_live_result = True
+                        first = rows[0]
+                        try:
+                            freq = float(first["freq"])
+                            depth = int(first["depth"])
+                            score = float(first["score"])
+                        except (KeyError, TypeError, ValueError):
+                            score_ok = False
+                            score_detail = "search row score fields are invalid"
+                            break
+
+                        expected = round((freq * 10.0) + 1000.0 - (depth * 5.0), 6)
+                        if abs(score - expected) > 1e-6:
+                            score_ok = False
+                            score_detail = f"score mismatch: got {score}, expected {expected}"
+                            break
                         break
 
                 time.sleep(0.3)
@@ -342,12 +400,18 @@ def live_index_search_and_resume_check(root: Path, python_bin: str) -> list[Chec
 
         if exit_code != 0:
             results.append(CheckResult("Live index + search", False, f"index exited with code {exit_code}"))
-        elif not triple_shape_ok:
-            results.append(CheckResult("Search triple contract", False, triple_shape_detail))
+        elif not shape_ok:
+            results.append(CheckResult("Search contract", False, shape_detail))
+        elif not score_ok:
+            results.append(CheckResult("Public score formula", False, score_detail))
         else:
             details = "live results observed before indexing finished" if saw_live_result else "no live hit observed; run still completed"
             results.append(CheckResult("Live index + search", saw_live_result, details))
-            results.append(CheckResult("Search triple contract", True, "search JSON rows contain only relevant_url/origin_url/depth"))
+            results.append(CheckResult("Search contract", True, "search JSON rows include word/url/origin/depth/freq/score"))
+            results.append(CheckResult("Public score formula", True, "score matches (freq*10)+1000-(depth*5)"))
+
+        data_ok, data_detail = _validate_term_data(Path(db_path))
+        results.append(CheckResult("term data inspectability", data_ok, data_detail))
 
         status_proc = run_cmd([python_bin, "main.py", "--db", db_path, "status"], cwd=root)
         if status_proc.returncode != 0:

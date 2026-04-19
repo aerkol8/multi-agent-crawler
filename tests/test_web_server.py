@@ -134,14 +134,18 @@ class WebServerTestCase(unittest.TestCase):
 
         self.assertTrue(completed)
 
-        query = urlencode({"q": "python crawler", "limit": 20})
+        with urlopen(f"{self.base_url}/api/events?run_id={run_id}", timeout=5) as stream_response:
+            first_line = stream_response.readline().decode("utf-8", errors="ignore").strip()
+            self.assertEqual(first_line, "event: status")
+
+        query = urlencode({"q": "python crawler", "limit": 20, "sortBy": "relevance"})
         status_code, rows = http_json("GET", f"{self.base_url}/api/search?{query}")
         self.assertEqual(status_code, 200)
         self.assertIsInstance(rows, list)
         self.assertGreater(len(rows), 0)
 
         keys = set(rows[0].keys())
-        self.assertEqual(keys, {"relevant_url", "origin_url", "depth"})
+        self.assertEqual(keys, {"word", "url", "origin", "depth", "freq", "score"})
 
         status_code, runs = http_json("GET", f"{self.base_url}/api/runs?limit=5")
         self.assertEqual(status_code, 200)

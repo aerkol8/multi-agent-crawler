@@ -10,7 +10,10 @@ class CrawlTask:
 
 
 @dataclass(frozen=True)
-class SearchTriple:
-    relevant_url: str
-    origin_url: str
+class SearchHit:
+    word: str
+    url: str
+    origin: str
     depth: int
+    freq: float
+    score: float

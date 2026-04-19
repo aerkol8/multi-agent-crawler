@@ -5,7 +5,7 @@ import re
 from collections import Counter
 from html.parser import HTMLParser
 from typing import Iterable
-from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9]{2,}")
 
@@ -60,11 +60,16 @@ def normalize_url(candidate: str, base_url: str | None = None) -> str | None:
     if not hostname:
         return None
 
+    try:
+        ascii_hostname = hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+
     port = parsed.port
     if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
-        netloc = f"{hostname}:{port}"
+        netloc = f"{ascii_hostname}:{port}"
     else:
-        netloc = hostname
+        netloc = ascii_hostname
 
     path = parsed.path or "/"
     normalized_path = posixpath.normpath(path)
@@ -73,6 +78,9 @@ def normalize_url(candidate: str, base_url: str | None = None) -> str | None:
     if path.endswith("/") and not normalized_path.endswith("/"):
         normalized_path += "/"
 
+    # Keep reserved URL path separators while percent-encoding non-ASCII bytes.
+    encoded_path = quote(normalized_path, safe="/%-._~!$&'()*+,;=:@")
+
     query_items = parse_qsl(parsed.query, keep_blank_values=True)
     query_items.sort()
     normalized_query = urlencode(query_items, doseq=True)
@@ -80,7 +88,7 @@ def normalize_url(candidate: str, base_url: str | None = None) -> str | None:
     normalized = parsed._replace(
         scheme=scheme,
         netloc=netloc,
-        path=normalized_path,
+        path=encoded_path,
         params="",
         query=normalized_query,
         fragment="",

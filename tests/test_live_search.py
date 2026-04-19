@@ -93,10 +93,12 @@ class LiveSearchTestCase(unittest.TestCase):
                     results = search.search("python crawler", limit=10)
                     if results and worker_thread.is_alive():
                         first = results[0]
-                        self.assertTrue(hasattr(first, "relevant_url"))
-                        self.assertTrue(hasattr(first, "origin_url"))
+                        self.assertTrue(hasattr(first, "word"))
+                        self.assertTrue(hasattr(first, "url"))
+                        self.assertTrue(hasattr(first, "origin"))
                         self.assertTrue(hasattr(first, "depth"))
-                        self.assertFalse(hasattr(first, "score"))
+                        self.assertTrue(hasattr(first, "freq"))
+                        self.assertTrue(hasattr(first, "score"))
                         found_while_running = True
                         break
                     if not worker_thread.is_alive():

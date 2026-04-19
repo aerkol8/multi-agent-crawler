@@ -130,7 +130,7 @@ def main() -> int:
         status = run_cmd([args.python, str(main_py), "--db", db_path, "status"], cwd=root)
         print(status.stdout.strip())
 
-        print("STEP 5: Show final search triples")
+        print("STEP 5: Show final search records")
         search_final = run_cmd(
             [args.python, str(main_py), "--db", db_path, "search", "crawler", "--json", "--limit", "10"],
             cwd=root,

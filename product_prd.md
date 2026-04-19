@@ -10,7 +10,7 @@ Teams need a crawler that can index a large set of pages from a seed URL with co
 - Implement index(origin, k) for bounded-depth crawling.
 - Guarantee URL-level deduplication per crawl run.
 - Provide explicit backpressure controls to keep load bounded.
-- Implement search(query) that returns triples: (relevant_url, origin_url, depth).
+- Implement search(query) that returns public fields: (word, url, origin, depth, freq, score).
 - Allow search to run while indexing is active and reflect fresh indexed results.
 - Provide a practical CLI for index, search, status, and run inspection.
 - Support resume semantics after interruption.
@@ -43,10 +43,11 @@ Teams need a crawler that can index a large set of pages from a seed URL with co
 
 ### 3) Search
 - Input: query string.
-- Output: list of tuples (relevant_url, origin_url, depth).
-- Relevance: token-match with term-frequency scoring.
+- Output: list of records (word, url, origin, depth, freq, score).
+- Relevance: token-match with public score formula.
 - Matching semantics: all query terms are required (AND logic).
-- Search must read from shared index while indexing writes continue.
+- Search must read from shared append-only index while indexing writes continue.
+- API supports `sortBy=relevance` (default) and `sortBy=depth`.
 
 ### 4) Runtime Status and Operations
 - CLI command to report run-level status, queue depth, worker activity, and throttling.
@@ -56,23 +57,24 @@ Teams need a crawler that can index a large set of pages from a seed URL with co
 
 ## System Design Summary
 - Language/runtime: Python 3.12, stdlib-first.
-- Storage: SQLite with WAL mode for concurrent reads while writing.
+- Storage: append-only filesystem logs with replayable state and inspectable bucketed `*.data` files.
 - Crawler: worker threads + feeder thread + token bucket limiter.
-- Dedup: normalized URL + unique constraints in run_discoveries/frontier tables.
-- Search index: inverted table (page_terms) updated as pages are processed.
+- Dedup: normalized URL + per-run discovery map persisted in append logs.
+- Search index: append-only term records replayed into in-memory lookup.
 
 ## Data Contracts
 - index(origin, k): starts or resumes crawl run.
-- search(query): returns (relevant_url, origin_url, depth).
+- search(query): returns (word, url, origin, depth, freq, score).
 - status(run_id optional): returns run metadata, frontier counts, runtime heartbeat.
 
 ## Acceptance Criteria
 - A run with k >= 1 completes and marks run status completed.
 - Duplicate links are not crawled twice in the same run.
-- Search returns valid tuples with origin/depth metadata.
+- Search returns valid records with public score and origin/depth metadata.
 - Search returns results before index finishes on a multi-page crawl.
 - Status reflects queue depth and throttled events during crawl.
 - Resume moves processing tasks back to queued and can continue.
+- Bucketed `*.data` files (including `all.data`) exist and are manually inspectable for grader checks.
 - Local scalability profile run emits throughput and queue/backpressure metrics on localhost.
 
 ## Milestones
@@ -83,6 +85,6 @@ Teams need a crawler that can index a large set of pages from a seed URL with co
 5. Tests and documentation.
 
 ## Risks and Mitigations
-- SQLite write contention: serialize writes in process and use WAL for readers.
+- Append-log write contention: use shared per-root lock and atomic file replacement.
 - Crawl explosion via broad link graph: default same-host mode and bounded depth.
 - Partial failure during processing: retry fetches, mark failures, allow resume.
