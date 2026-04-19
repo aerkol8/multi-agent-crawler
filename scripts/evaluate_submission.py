@@ -1,0 +1,343 @@
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any
+
+
+@dataclass
+class CheckResult:
+    name: str
+    passed: bool
+    details: str
+
+
+def run_cmd(args: list[str], cwd: Path, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=timeout,
+    )
+
+
+def print_result(result: CheckResult) -> None:
+    status = "PASS" if result.passed else "FAIL"
+    print(f"[{status}] {result.name}")
+    if result.details:
+        print(f"       {result.details}")
+
+
+class EvalHandler(BaseHTTPRequestHandler):
+    routes = {
+        "/": "<html><body><a href='/a'>A</a><a href='/b'>B</a>seed page</body></html>",
+        "/a": "<html><body>crawler python requirement triple output</body></html>",
+        "/b": "<html><body><a href='/c'>C</a>index in progress</body></html>",
+        "/c": "<html><body>running while indexing</body></html>",
+    }
+    delays = {"/b": 1.2, "/c": 1.0}
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        payload = self.routes.get(path)
+        if payload is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        delay = self.delays.get(path, 0.0)
+        if delay > 0:
+            time.sleep(delay)
+
+        body = payload.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+
+def required_files_check(root: Path) -> CheckResult:
+    required = [
+        "product_prd.md",
+        "readme.md",
+        "recommendation.md",
+        "multi_agent_workflow.md",
+        "agents/product_agent.md",
+        "agents/architecture_agent.md",
+        "agents/crawler_agent.md",
+        "agents/search_agent.md",
+        "agents/qa_agent.md",
+        "agents/docs_agent.md",
+        "agents/interactions_log.md",
+    ]
+    missing = [rel for rel in required if not (root / rel).exists()]
+    if missing:
+        return CheckResult("Required artifacts exist", False, f"missing: {', '.join(missing)}")
+    return CheckResult("Required artifacts exist", True, "all required docs and agent files are present")
+
+
+def compile_check(root: Path, python_bin: str) -> CheckResult:
+    proc = run_cmd([python_bin, "-m", "compileall", "src", "tests", "scripts", "main.py"], cwd=root)
+    if proc.returncode != 0:
+        return CheckResult("Syntax compile check", False, proc.stderr.strip() or proc.stdout.strip())
+    return CheckResult("Syntax compile check", True, "compileall completed successfully")
+
+
+def test_check(root: Path, python_bin: str) -> CheckResult:
+    proc = run_cmd([python_bin, "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=root)
+    if proc.returncode != 0:
+        tail = (proc.stdout + "\n" + proc.stderr).strip().splitlines()[-12:]
+        return CheckResult("Automated tests", False, " | ".join(tail))
+    return CheckResult("Automated tests", True, "unittest suite passed")
+
+
+def cli_check(root: Path, python_bin: str) -> CheckResult:
+    proc = run_cmd([python_bin, "main.py", "--help"], cwd=root)
+    if proc.returncode != 0:
+        return CheckResult("CLI availability", False, proc.stderr.strip() or "main.py --help failed")
+    out = proc.stdout
+    expected = ["index", "search", "status", "runs"]
+    missing = [token for token in expected if token not in out]
+    if missing:
+        return CheckResult("CLI availability", False, f"missing commands in help: {', '.join(missing)}")
+    return CheckResult("CLI availability", True, "index/search/status/runs commands exposed")
+
+
+def _parse_latest_run_id(root: Path, python_bin: str, db_path: str) -> int | None:
+    proc = run_cmd([python_bin, "main.py", "--db", db_path, "runs", "--limit", "1"], cwd=root)
+    if proc.returncode != 0:
+        return None
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not rows:
+        return None
+    try:
+        return int(rows[0]["id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _validate_triple_payload(payload: str) -> tuple[bool, str]:
+    try:
+        rows = json.loads(payload or "[]")
+    except json.JSONDecodeError as exc:
+        return False, f"invalid JSON: {exc}"
+
+    if not isinstance(rows, list):
+        return False, "search output is not a list"
+
+    for row in rows:
+        if not isinstance(row, dict):
+            return False, "search row is not an object"
+        keys = set(row.keys())
+        if keys != {"relevant_url", "origin_url", "depth"}:
+            return False, f"unexpected keys: {sorted(keys)}"
+    return True, "search rows use strict triple fields"
+
+
+def live_index_search_and_resume_check(root: Path, python_bin: str) -> list[CheckResult]:
+    results: list[CheckResult] = []
+
+    server = HTTPServer(("127.0.0.1", 0), EvalHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    host, port = server.server_address
+    origin = f"http://{host}:{port}/"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "eval.db")
+
+        index_cmd = [
+            python_bin,
+            "main.py",
+            "--db",
+            db_path,
+            "index",
+            origin,
+            "2",
+            "--workers",
+            "2",
+            "--queue-depth",
+            "4",
+            "--rps",
+            "20",
+            "--quiet",
+        ]
+
+        proc = subprocess.Popen(
+            index_cmd,
+            cwd=str(root),
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        saw_live_result = False
+        triple_shape_ok = True
+        triple_shape_detail = ""
+
+        try:
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    break
+
+                search_proc = run_cmd(
+                    [python_bin, "main.py", "--db", db_path, "search", "crawler", "--json"],
+                    cwd=root,
+                    timeout=30,
+                )
+                if search_proc.returncode == 0:
+                    valid, detail = _validate_triple_payload(search_proc.stdout)
+                    if not valid:
+                        triple_shape_ok = False
+                        triple_shape_detail = detail
+                        break
+
+                    try:
+                        rows = json.loads(search_proc.stdout or "[]")
+                    except json.JSONDecodeError:
+                        rows = []
+                    if rows and proc.poll() is None:
+                        saw_live_result = True
+                        break
+
+                time.sleep(0.3)
+
+            exit_code = proc.wait(timeout=40)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            results.append(CheckResult("Live index + search", False, "indexing process timed out"))
+            exit_code = -1
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+        if exit_code != 0:
+            results.append(CheckResult("Live index + search", False, f"index exited with code {exit_code}"))
+        elif not triple_shape_ok:
+            results.append(CheckResult("Search triple contract", False, triple_shape_detail))
+        else:
+            details = "live results observed before indexing finished" if saw_live_result else "no live hit observed; run still completed"
+            results.append(CheckResult("Live index + search", saw_live_result, details))
+            results.append(CheckResult("Search triple contract", True, "search JSON rows contain only relevant_url/origin_url/depth"))
+
+        status_proc = run_cmd([python_bin, "main.py", "--db", db_path, "status"], cwd=root)
+        if status_proc.returncode != 0:
+            results.append(CheckResult("Status command", False, status_proc.stderr.strip() or "status command failed"))
+        else:
+            try:
+                payload = json.loads(status_proc.stdout)
+                runtime = payload.get("runtime") or {}
+                needed = ["queue_depth", "queue_capacity", "active_workers", "throttled_events"]
+                missing = [k for k in needed if k not in runtime]
+                if missing:
+                    results.append(CheckResult("Status telemetry", False, f"missing runtime keys: {', '.join(missing)}"))
+                else:
+                    results.append(CheckResult("Status telemetry", True, "runtime telemetry keys are present"))
+            except json.JSONDecodeError as exc:
+                results.append(CheckResult("Status telemetry", False, f"invalid JSON: {exc}"))
+
+        # Resume flow check via forced interruption.
+        interrupt_cmd = [
+            python_bin,
+            "main.py",
+            "--db",
+            db_path,
+            "index",
+            origin,
+            "2",
+            "--workers",
+            "1",
+            "--queue-depth",
+            "2",
+            "--rps",
+            "20",
+            "--quiet",
+        ]
+        interrupt_proc = subprocess.Popen(
+            interrupt_cmd,
+            cwd=str(root),
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(0.5)
+        interrupt_proc.terminate()
+        try:
+            interrupt_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            interrupt_proc.kill()
+            interrupt_proc.wait(timeout=5)
+
+        run_id = _parse_latest_run_id(root, python_bin, db_path)
+        if run_id is None:
+            results.append(CheckResult("Resume command", False, "could not determine latest run id for resume"))
+        else:
+            resume = run_cmd(
+                [python_bin, "main.py", "--db", db_path, "index", "--resume-run-id", str(run_id), "--quiet"],
+                cwd=root,
+                timeout=60,
+            )
+            if resume.returncode != 0:
+                details = resume.stderr.strip() or resume.stdout.strip() or f"exit code {resume.returncode}"
+                results.append(CheckResult("Resume command", False, details))
+            else:
+                results.append(CheckResult("Resume command", True, f"run {run_id} resumed and completed"))
+
+    server.shutdown()
+    server.server_close()
+    server_thread.join(timeout=2)
+    return results
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Evaluate submission rubric with PASS/FAIL checks")
+    parser.add_argument("--python", default=sys.executable, help="Python executable for subprocess checks")
+    args = parser.parse_args()
+
+    root = Path(__file__).resolve().parents[1]
+
+    checks: list[CheckResult] = []
+    checks.append(required_files_check(root))
+    checks.append(compile_check(root, args.python))
+    checks.append(test_check(root, args.python))
+    checks.append(cli_check(root, args.python))
+    checks.extend(live_index_search_and_resume_check(root, args.python))
+
+    print("\n=== Submission Evaluation ===")
+    passed_count = 0
+    for item in checks:
+        print_result(item)
+        if item.passed:
+            passed_count += 1
+
+    total = len(checks)
+    print(f"\nSummary: {passed_count}/{total} checks passed")
+
+    if passed_count == total:
+        print("Overall: PASS")
+        return 0
+
+    print("Overall: FAIL")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
