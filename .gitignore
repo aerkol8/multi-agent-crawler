@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.db
+!crawler.db/
+!crawler.db/**
 *.sqlite
 .pytest_cache/
 .mypy_cache/
