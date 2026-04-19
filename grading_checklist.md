@@ -15,6 +15,7 @@ Fast path:
 | Simple CLI for index/search/status | src/webcrawler/cli.py | python main.py --help |
 | View indexing progress/queue/backpressure status | runtime_state recording and status command in src/webcrawler/storage.py and src/webcrawler/cli.py | python main.py --db demo.db status |
 | Resume after interruption | requeue_processing_tasks + --resume-run-id in src/webcrawler/storage.py and src/webcrawler/cli.py | python -m unittest discover -s tests -v (test_resume_requeues_processing_tasks) |
+| Optional plus: localhost web server UI/API | src/webcrawler/web.py + main.py web command | python scripts/evaluate_submission.py --python <python-bin> (Localhost web server PASS) |
 | Multi-agent workflow proof | multi_agent_workflow.md + agents/*.md + agents/interactions_log.md | review docs directly |
 
 ## Reproducible End-to-End Proof

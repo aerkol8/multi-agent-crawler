@@ -50,6 +50,7 @@ Teams need a crawler that can index a large set of pages from a seed URL with co
 - CLI command to report run-level status, queue depth, worker activity, and throttling.
 - CLI command to list recent runs.
 - Resume capability for interrupted runs.
+- Localhost web dashboard and JSON API for interactive operations (optional plus, implemented).
 
 ## System Design Summary
 - Language/runtime: Python 3.12, stdlib-first.

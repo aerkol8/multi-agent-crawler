@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import urlopen
 
 
 @dataclass
@@ -110,11 +113,61 @@ def cli_check(root: Path, python_bin: str) -> CheckResult:
     if proc.returncode != 0:
         return CheckResult("CLI availability", False, proc.stderr.strip() or "main.py --help failed")
     out = proc.stdout
-    expected = ["index", "search", "status", "runs"]
+    expected = ["index", "search", "status", "runs", "web"]
     missing = [token for token in expected if token not in out]
     if missing:
         return CheckResult("CLI availability", False, f"missing commands in help: {', '.join(missing)}")
-    return CheckResult("CLI availability", True, "index/search/status/runs commands exposed")
+    return CheckResult("CLI availability", True, "index/search/status/runs/web commands exposed")
+
+
+def web_server_check(root: Path, python_bin: str) -> CheckResult:
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "web-eval.db")
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            host, port = sock.getsockname()
+
+        proc = subprocess.Popen(
+            [
+                python_bin,
+                "main.py",
+                "--db",
+                db_path,
+                "web",
+                "--host",
+                host,
+                "--port",
+                str(port),
+            ],
+            cwd=str(root),
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        try:
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    return CheckResult("Localhost web server", False, f"web command exited with code {proc.returncode}")
+
+                try:
+                    with urlopen(f"http://{host}:{port}/api/health", timeout=1.0) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                        if payload.get("ok") is True:
+                            return CheckResult("Localhost web server", True, f"health endpoint reachable on {host}:{port}")
+                except (URLError, json.JSONDecodeError):
+                    time.sleep(0.2)
+
+            return CheckResult("Localhost web server", False, "health endpoint did not become ready")
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
 
 def _parse_latest_run_id(root: Path, python_bin: str, db_path: str) -> int | None:
@@ -319,6 +372,7 @@ def main() -> int:
     checks.append(compile_check(root, args.python))
     checks.append(test_check(root, args.python))
     checks.append(cli_check(root, args.python))
+    checks.append(web_server_check(root, args.python))
     checks.extend(live_index_search_and_resume_check(root, args.python))
 
     print("\n=== Submission Evaluation ===")

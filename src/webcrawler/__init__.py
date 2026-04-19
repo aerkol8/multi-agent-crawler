@@ -5,5 +5,6 @@ __all__ = [
     "storage",
     "crawler",
     "search",
+    "web",
     "utils",
 ]

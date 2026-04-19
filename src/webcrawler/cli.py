@@ -9,6 +9,7 @@ from .crawler import CrawlerEngine, RuntimeSnapshot
 from .search import SearchService
 from .storage import Storage
 from .utils import normalize_url
+from .web import serve_web
 
 
 def _status_hook(snapshot: RuntimeSnapshot) -> None:
@@ -120,6 +121,11 @@ def cmd_runs(args: argparse.Namespace) -> int:
         storage.close_thread_connection()
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    serve_web(db_path=args.db, host=args.host, port=args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Single-machine web crawler with live search")
     parser.add_argument("--db", default="crawler.db", help="SQLite database path")
@@ -151,6 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
     runs_parser = subparsers.add_parser("runs", help="List recent runs")
     runs_parser.add_argument("--limit", type=int, default=20, help="Number of runs")
     runs_parser.set_defaults(func=cmd_runs)
+
+    web_parser = subparsers.add_parser("web", help="Run localhost web dashboard")
+    web_parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
+    web_parser.add_argument("--port", type=int, default=8080, help="Port to bind")
+    web_parser.set_defaults(func=cmd_web)
 
     return parser
 

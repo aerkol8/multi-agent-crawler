@@ -108,6 +108,31 @@ This prints PASS/FAIL for:
 - status telemetry presence
 - resume behavior
 
+## 9) Run localhost web server
+
+```bash
+"/Users/aerkol/Desktop/web crawler multiagent/.venv/bin/python" main.py --db crawler.db web --host 127.0.0.1 --port 8080
+```
+
+Open in browser:
+- http://127.0.0.1:8080/
+
+Web UI capabilities:
+- start indexing with origin and depth
+- run search while indexing is active
+- view status with queue depth and throttled events
+- list runs and active state
+- stop and resume runs
+
+API endpoints (same server):
+- GET /api/health
+- GET /api/runs?limit=20
+- GET /api/status?run_id=1
+- GET /api/search?q=crawler&limit=20
+- POST /api/index
+- POST /api/resume
+- POST /api/stop
+
 Current automated checks validate:
 - URL normalization behavior
 - depth limit enforcement
@@ -115,6 +140,7 @@ Current automated checks validate:
 - search availability while indexing is active
 - single-worker backpressure progress (no deadlock)
 - resume requeue semantics
+- localhost web server health and startup
 
 ## Backpressure Model
 - pending frontier limit: --queue-depth
@@ -128,6 +154,7 @@ Current automated checks validate:
 - search: query indexed pages and return (relevant_url, origin_url, depth)
 - status: inspect run state, queue counters, and runtime heartbeat
 - runs: list recent crawl runs
+- web: run localhost web dashboard and JSON API
 
 ## Requirement Traceability
 
