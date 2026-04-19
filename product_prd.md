@@ -39,11 +39,13 @@ Teams need a crawler that can index a large set of pages from a seed URL with co
 - Configurable global requests-per-second cap.
 - Fixed worker pool (bounded concurrency).
 - Backpressure events are counted and exposed via status.
+- Pending frontier limit is treated as a soft operational cap when deadlock-avoidance logic is required to preserve progress.
 
 ### 3) Search
 - Input: query string.
 - Output: list of tuples (relevant_url, origin_url, depth).
 - Relevance: token-match with term-frequency scoring.
+- Matching semantics: all query terms are required (AND logic).
 - Search must read from shared index while indexing writes continue.
 
 ### 4) Runtime Status and Operations
@@ -71,6 +73,7 @@ Teams need a crawler that can index a large set of pages from a seed URL with co
 - Search returns results before index finishes on a multi-page crawl.
 - Status reflects queue depth and throttled events during crawl.
 - Resume moves processing tasks back to queued and can continue.
+- Local scalability profile run emits throughput and queue/backpressure metrics on localhost.
 
 ## Milestones
 1. Core schema and storage layer.

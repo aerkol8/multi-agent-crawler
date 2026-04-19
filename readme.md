@@ -62,6 +62,11 @@ Output shape per result:
 - origin_url
 - depth
 
+Search semantics:
+- Query terms are matched with ALL-terms logic (AND behavior).
+- Result ordering uses internal ranking by summed term frequency, then shallower depth, then URL order.
+- Internal ranking score is not returned in the public response contract.
+
 ## 5) Inspect status and backpressure
 
 ```bash
@@ -103,6 +108,7 @@ This prints PASS/FAIL for:
 - required artifacts
 - compile + test health
 - CLI availability
+- scalability profile generation
 - live search during active indexing
 - strict triple output contract
 - status telemetry presence
@@ -112,6 +118,12 @@ This prints PASS/FAIL for:
 
 ```bash
 "/Users/aerkol/Desktop/web crawler multiagent/.venv/bin/python" main.py --db crawler.db web --host 127.0.0.1 --port 8080
+```
+
+If port 8080 is already in use, choose another port, for example:
+
+```bash
+"/Users/aerkol/Desktop/web crawler multiagent/.venv/bin/python" main.py --db crawler.db web --host 127.0.0.1 --port 8090
 ```
 
 Open in browser:
@@ -147,6 +159,21 @@ Current automated checks validate:
 - global request cap: --rps
 - fixed workers: --workers
 - throttled_events metric increments when pending limit blocks discovery
+- deadlock-avoidance escape hatch: when all workers are busy for too long, discovery can proceed to preserve progress; treat queue depth as a soft operational limit in that edge case
+
+## 10) Generate scalability evidence (teacher-friendly)
+
+```bash
+"/Users/aerkol/Desktop/web crawler multiagent/.venv/bin/python" scripts/scalability_profile.py --pages 400 --workers 8 --queue-depth 60 --rps 150 --output scalability_report.json
+```
+
+This command runs a synthetic local crawl and prints JSON metrics including:
+- elapsed_seconds
+- discovered_urls
+- urls_per_second
+- max_snapshot_queue_depth
+- max_snapshot_throttled_events
+- live_search_seen_during_index
 
 ## CLI Commands
 

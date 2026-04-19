@@ -170,6 +170,64 @@ def web_server_check(root: Path, python_bin: str) -> CheckResult:
                     proc.kill()
 
 
+def scalability_profile_check(root: Path, python_bin: str) -> CheckResult:
+    with tempfile.TemporaryDirectory() as tmp:
+        output_path = str(Path(tmp) / "scalability_report.json")
+        proc = run_cmd(
+            [
+                python_bin,
+                "scripts/scalability_profile.py",
+                "--pages",
+                "180",
+                "--workers",
+                "4",
+                "--queue-depth",
+                "30",
+                "--rps",
+                "120",
+                "--output",
+                output_path,
+            ],
+            cwd=root,
+            timeout=120,
+        )
+        if proc.returncode != 0:
+            details = proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}"
+            return CheckResult("Scalability profile", False, details)
+
+        try:
+            payload = json.loads(Path(output_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return CheckResult("Scalability profile", False, f"invalid profile output: {exc}")
+
+        required_keys = {
+            "completed",
+            "elapsed_seconds",
+            "discovered_urls",
+            "urls_per_second",
+            "max_snapshot_queue_depth",
+            "live_search_seen_during_index",
+        }
+        missing = sorted(k for k in required_keys if k not in payload)
+        if missing:
+            return CheckResult("Scalability profile", False, f"missing keys: {', '.join(missing)}")
+
+        if not payload.get("completed"):
+            return CheckResult("Scalability profile", False, "profile crawl did not complete")
+
+        if float(payload.get("urls_per_second", 0.0)) <= 0.0:
+            return CheckResult("Scalability profile", False, "non-positive urls_per_second")
+
+        return CheckResult(
+            "Scalability profile",
+            True,
+            (
+                f"completed with {payload.get('discovered_urls')} URLs in "
+                f"{payload.get('elapsed_seconds')}s"
+            ),
+        )
+
+
 def _parse_latest_run_id(root: Path, python_bin: str, db_path: str) -> int | None:
     proc = run_cmd([python_bin, "main.py", "--db", db_path, "runs", "--limit", "1"], cwd=root)
     if proc.returncode != 0:
@@ -373,6 +431,7 @@ def main() -> int:
     checks.append(test_check(root, args.python))
     checks.append(cli_check(root, args.python))
     checks.append(web_server_check(root, args.python))
+    checks.append(scalability_profile_check(root, args.python))
     checks.extend(live_index_search_and_resume_check(root, args.python))
 
     print("\n=== Submission Evaluation ===")
