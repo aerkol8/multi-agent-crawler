@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,7 +44,6 @@ class Storage:
         self._terms_file = self._root / "terms.jsonl"
         self._runtime_file = self._root / "runtime.jsonl"
         self._term_data_dir = self._root
-        self._legacy_term_data_dir = self._root / "data" / "storage"
 
         self._ensure_files()
 
@@ -54,6 +54,9 @@ class Storage:
         self._terms_by_url: dict[str, dict[str, float]] = {}
         self._runtime_by_run: dict[int, dict[str, Any]] = {}
         self._next_run_id = 1
+        self._term_data_dirty = False
+        self._last_term_data_rewrite_monotonic = 0.0
+        self._term_data_rewrite_interval_seconds = 0.75
 
         self._load_state()
 
@@ -76,7 +79,27 @@ class Storage:
                 path.write_text("", encoding="utf-8")
 
         self._term_data_dir.mkdir(parents=True, exist_ok=True)
-        self._legacy_term_data_dir.mkdir(parents=True, exist_ok=True)
+        self._cleanup_legacy_term_data_locked()
+
+    def _cleanup_legacy_term_data_locked(self) -> None:
+        legacy_dir = self._root / "data" / "storage"
+        if not legacy_dir.exists():
+            return
+
+        for existing in list(legacy_dir.glob("*.data")):
+            existing.unlink(missing_ok=True)
+
+        try:
+            legacy_dir.rmdir()
+        except OSError:
+            return
+
+        legacy_parent = legacy_dir.parent
+        try:
+            if legacy_parent.exists() and not any(legacy_parent.iterdir()):
+                legacy_parent.rmdir()
+        except OSError:
+            return
 
     def _append_json_line(self, path: Path, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
@@ -216,10 +239,31 @@ class Storage:
         if self._runs:
             self._next_run_id = max(self._runs.keys()) + 1
 
+        if not self._term_data_files_ready_locked():
+            self._rewrite_p_data_locked()
+            self._last_term_data_rewrite_monotonic = time.monotonic()
+
+    def _term_data_files_ready_locked(self) -> bool:
+        return (self._term_data_dir / "all.data").exists()
+
+    def _mark_term_data_dirty_locked(self) -> None:
+        self._term_data_dirty = True
+
+    def _flush_term_data_if_needed_locked(self, force: bool = False) -> None:
+        if not self._term_data_dirty:
+            return
+
+        now = time.monotonic()
+        if not force and (now - self._last_term_data_rewrite_monotonic) < self._term_data_rewrite_interval_seconds:
+            return
+
         self._rewrite_p_data_locked()
+        self._term_data_dirty = False
+        self._last_term_data_rewrite_monotonic = now
 
     def close_thread_connection(self) -> None:
-        return
+        with self._write_lock:
+            self._flush_term_data_if_needed_locked(force=True)
 
     def _write_run(self, run: dict[str, Any]) -> None:
         self._append_json_line(self._runs_file, {"event": "run", "run": run})
@@ -264,6 +308,8 @@ class Storage:
             run["updated_at"] = utc_now()
             run["last_error"] = last_error
             self._write_run(dict(run))
+            if status in {"completed", "stopped", "failed"}:
+                self._flush_term_data_if_needed_locked(force=True)
 
     def add_discovery(self, run_id: int, url: str, depth: int) -> bool:
         return self.discover_and_enqueue(run_id, url, depth, discovered_from=None)
@@ -303,7 +349,6 @@ class Storage:
             }
             frontier[url] = record
             self._append_json_line(self._frontier_file, {"event": "frontier", **record})
-            self._rewrite_p_data_locked()
             return True
 
     def enqueue_frontier(self, run_id: int, url: str, depth: int, discovered_from: str | None) -> bool:
@@ -425,7 +470,8 @@ class Storage:
                     "updated_at": now,
                 },
             )
-            self._rewrite_p_data_locked()
+            self._mark_term_data_dirty_locked()
+            self._flush_term_data_if_needed_locked()
 
     def delete_url(self, url: str, run_id: int | None = None) -> dict[str, int]:
         with self._write_lock:
@@ -493,7 +539,8 @@ class Storage:
                         },
                     )
 
-            self._rewrite_p_data_locked()
+            self._mark_term_data_dirty_locked()
+            self._flush_term_data_if_needed_locked()
 
             return {
                 "deleted_frontier": deleted_frontier,
@@ -616,16 +663,18 @@ class Storage:
 
         payloads["all"] = "\n".join(all_lines) + ("\n" if all_lines else "")
 
-        for target_dir in (self._term_data_dir, self._legacy_term_data_dir):
-            target_dir.mkdir(parents=True, exist_ok=True)
-            expected_names = {f"{bucket}.data" for bucket in payloads.keys()}
-            for existing in target_dir.glob("*.data"):
-                if existing.name in expected_names:
-                    continue
-                existing.unlink(missing_ok=True)
+        target_dir = self._term_data_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        expected_names = {f"{bucket}.data" for bucket in payloads.keys()}
+        for existing in target_dir.glob("*.data"):
+            if existing.name in expected_names:
+                continue
+            existing.unlink(missing_ok=True)
 
-            for bucket, payload in payloads.items():
-                target = target_dir / f"{bucket}.data"
-                temp_path = target.with_suffix(target.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
-                temp_path.write_text(payload, encoding="utf-8")
-                os.replace(temp_path, target)
+        for bucket, payload in payloads.items():
+            target = target_dir / f"{bucket}.data"
+            temp_path = target.with_suffix(target.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
+            temp_path.write_text(payload, encoding="utf-8")
+            os.replace(temp_path, target)
+
+        self._cleanup_legacy_term_data_locked()

@@ -230,6 +230,7 @@ DASHBOARD_HTML = """<!doctype html>
         --accent: #006d77;
         --border: #d8deea;
       }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
         padding: 24px;
@@ -240,7 +241,7 @@ DASHBOARD_HTML = """<!doctype html>
       h1 { margin: 0 0 14px 0; }
       .layout {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
         gap: 16px;
       }
       .panel {
@@ -259,6 +260,8 @@ DASHBOARD_HTML = """<!doctype html>
         gap: 8px;
       }
       input, button, select {
+        width: 100%;
+        min-width: 0;
         font-size: 0.95rem;
         padding: 8px 10px;
         border-radius: 8px;
@@ -275,7 +278,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       .row {
         display: grid;
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
       }
       .muted { color: var(--muted); font-size: 0.9rem; }
@@ -283,6 +286,8 @@ DASHBOARD_HTML = """<!doctype html>
         margin: 0;
         max-height: 260px;
         overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
         background: #0f1724;
         color: #def0ff;
         border-radius: 10px;
@@ -298,6 +303,9 @@ DASHBOARD_HTML = """<!doctype html>
         border-bottom: 1px solid var(--border);
         text-align: left;
         padding: 6px 4px;
+        vertical-align: top;
+        word-break: break-word;
+        overflow-wrap: anywhere;
       }
       .chip {
         display: inline-block;
@@ -306,6 +314,11 @@ DASHBOARD_HTML = """<!doctype html>
         background: #edf7f8;
         color: #004f57;
         font-size: 0.8rem;
+      }
+      @media (max-width: 860px) {
+        body { padding: 14px; }
+        .layout { grid-template-columns: 1fr; }
+        .row { grid-template-columns: 1fr; }
       }
     </style>
   </head>
@@ -380,6 +393,8 @@ DASHBOARD_HTML = """<!doctype html>
     <script>
       let statusStream = null;
       let streamedRunId = null;
+      let runsRefreshInFlight = false;
+      let runsRefreshPending = false;
 
       async function api(method, path, payload) {
         const options = { method, headers: { 'Content-Type': 'application/json' } };
@@ -397,17 +412,30 @@ DASHBOARD_HTML = """<!doctype html>
       }
 
       async function refreshRuns() {
-        const runs = await api('GET', '/api/runs?limit=20');
-        const tbody = document.querySelector('#runs-table tbody');
-        tbody.innerHTML = '';
-        for (const run of runs) {
-          const tr = document.createElement('tr');
-          tr.innerHTML = '<td>' + run.id + '</td>' +
-            '<td>' + run.origin_url + '</td>' +
-            '<td>' + run.max_depth + '</td>' +
-            '<td><span class="chip">' + run.status + '</span></td>' +
-            '<td>' + (run.active ? 'yes' : 'no') + '</td>';
-          tbody.appendChild(tr);
+        if (runsRefreshInFlight) {
+          runsRefreshPending = true;
+          return;
+        }
+        runsRefreshInFlight = true;
+        try {
+          const runs = await api('GET', '/api/runs?limit=20');
+          const tbody = document.querySelector('#runs-table tbody');
+          tbody.innerHTML = '';
+          for (const run of runs) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = '<td>' + run.id + '</td>' +
+              '<td>' + run.origin_url + '</td>' +
+              '<td>' + run.max_depth + '</td>' +
+              '<td><span class="chip">' + run.status + '</span></td>' +
+              '<td>' + (run.active ? 'yes' : 'no') + '</td>';
+            tbody.appendChild(tr);
+          }
+        } finally {
+          runsRefreshInFlight = false;
+          if (runsRefreshPending) {
+            runsRefreshPending = false;
+            refreshRuns().catch(() => {});
+          }
         }
       }
 
@@ -443,7 +471,6 @@ DASHBOARD_HTML = """<!doctype html>
 
         const handlePayload = (payload) => {
           setPre('status-results', payload || {});
-          refreshRuns().catch(() => {});
         };
 
         statusStream.addEventListener('status', (event) => {
